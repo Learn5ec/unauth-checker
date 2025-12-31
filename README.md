@@ -475,11 +475,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
----
-
-## 📝 License
-
-This project is licensed under the **MIT License** - see the LICENSE file for details.
 
 ---
 
@@ -498,6 +493,7 @@ For issues, questions, or suggestions:
 - 🐛 **Bug Reports:** Open an issue on GitHub
 - 💬 **Questions:** Check existing issues or open a new one
 - ⭐ **Show Support:** Star the repository if you find it useful!
+- 🤝 **LinkedIN:** https://www.linkedin.com/in/yash-prajapati-791m18104/
 
 ---
 
