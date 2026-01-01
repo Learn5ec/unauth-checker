@@ -8,6 +8,15 @@ from urllib.parse import urlparse
 from typing import Dict, Any, List, Tuple, Optional
 from ai_agent import AIAgent
 
+# Try to import openpyxl for Excel generation, make it optional
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
 # Lazy initialization to avoid import-time failures
 _agent: Optional[AIAgent] = None
 
@@ -41,6 +50,143 @@ def update_progress(current: int, total: int):
     sys.stdout.flush()
 
 # -------------------------------------------------
+# Excel Helpers (Formatted output)
+# -------------------------------------------------
+
+# Column width mappings (in cm, converted to Excel units)
+# Excel column width: 1 cm ≈ 3.78 characters
+COLUMN_WIDTHS_CM = {
+    "endpoint": 4.7,        # 3.2 + 1.5
+    "method": 2.5,          # 1.0 + 1.5
+    "params_count": 3.55,   # 3.4 + 0.15
+    "params_values": 5.0,   # 3.5 + 1.5
+    "status_codes": 3.25,   # 3.0 + 0.25
+    "response": 11.5,       # 10.0 + 1.5
+    "confidence": 2.9,      # 2.5 + 0.4
+    "confidence_level": 4.2, # 3.5 + 0.7
+    "notes": 5.5            # 4.0 + 1.5
+}
+
+# Convert cm to Excel units (1 cm = 3.78 Excel units approximately)
+COLUMN_WIDTHS = {k: v * 3.78 for k, v in COLUMN_WIDTHS_CM.items()}
+
+# Row heights (in cm, converted to points)
+# Excel row height: 1 cm = 28.35 points
+HEADER_ROW_HEIGHT_CM = 0.7
+DATA_ROW_HEIGHT_CM = 3.85
+HEADER_ROW_HEIGHT_POINTS = HEADER_ROW_HEIGHT_CM * 28.35
+DATA_ROW_HEIGHT_POINTS = DATA_ROW_HEIGHT_CM * 28.35
+
+# Alignment configuration
+CENTER_ALIGNED_COLUMNS = {"method", "params_count", "status_codes", "confidence", "confidence_level"}
+TOP_ALIGNED_COLUMNS = {"response"}
+
+_excel_workbook = None
+_excel_worksheet = None
+_excel_filename = None
+
+def init_excel_file(filename: str):
+    """Initialize Excel file with headers and formatting."""
+    global _excel_workbook, _excel_worksheet, _excel_filename
+    
+    if not OPENPYXL_AVAILABLE:
+        return
+    
+    try:
+        excel_filename = filename.replace('.csv', '.xlsx')
+        _excel_filename = excel_filename
+        
+        _excel_workbook = Workbook()
+        _excel_worksheet = _excel_workbook.active
+        _excel_worksheet.title = "Unauth Check Results"
+        
+        # Write headers with proper alignment
+        for col_idx, field in enumerate(CSV_FIELDS, 1):
+            cell = _excel_worksheet.cell(row=1, column=col_idx)
+            cell.value = field
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+            
+            # Apply alignment based on column type (title row is top-aligned vertically)
+            # "response" and "notes" are center-aligned in title row, rest keep their alignment
+            if field in {"response", "notes"}:
+                cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+            elif field in CENTER_ALIGNED_COLUMNS:
+                cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        
+        # Set column widths (in Excel units, converted from cm)
+        for col_idx, field in enumerate(CSV_FIELDS, 1):
+            width = COLUMN_WIDTHS.get(field, 15)
+            _excel_worksheet.column_dimensions[get_column_letter(col_idx)].width = width
+        
+        # Set header row height (in points, converted from cm)
+        _excel_worksheet.row_dimensions[1].height = HEADER_ROW_HEIGHT_POINTS
+        
+    except Exception as e:
+        print(f"\n[!] Warning: Failed to initialize Excel file: {e}", file=sys.stderr)
+        _excel_workbook = None
+        _excel_worksheet = None
+
+def append_excel_row(row: Dict[str, Any]):
+    """Append a row to the Excel file and save in real-time."""
+    global _excel_worksheet, _excel_workbook, _excel_filename
+    
+    if not OPENPYXL_AVAILABLE or _excel_worksheet is None:
+        return
+    
+    try:
+        row_num = _excel_worksheet.max_row + 1
+        
+        # Set row height for data rows (in points, converted from cm)
+        _excel_worksheet.row_dimensions[row_num].height = DATA_ROW_HEIGHT_POINTS
+        
+        for col_idx, field in enumerate(CSV_FIELDS, 1):
+            cell = _excel_worksheet.cell(row=row_num, column=col_idx)
+            value = row.get(field, "")
+            cell.value = str(value)[:5000] if len(str(value)) > 5000 else value  # Limit to 5000 chars for Excel
+            
+            # Apply alignment based on column type
+            if field in TOP_ALIGNED_COLUMNS:
+                # Top-aligned (response column)
+                if field in CENTER_ALIGNED_COLUMNS:
+                    cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+                else:
+                    cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            elif field in CENTER_ALIGNED_COLUMNS:
+                # Center-aligned, vertically centered
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            else:
+                # Left-aligned, vertically centered
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        
+        # Save Excel file in real-time after each row (like CSV)
+        if _excel_filename and _excel_workbook:
+            _excel_workbook.save(_excel_filename)
+        
+    except Exception as e:
+        print(f"\n[!] Warning: Failed to write Excel row: {e}", file=sys.stderr)
+
+def save_excel_file():
+    """Save and close the Excel file."""
+    global _excel_workbook, _excel_worksheet, _excel_filename
+    
+    if not OPENPYXL_AVAILABLE or _excel_workbook is None:
+        return
+    
+    try:
+        if _excel_filename:
+            _excel_workbook.save(_excel_filename)
+            _excel_workbook.close()
+    except Exception as e:
+        print(f"\n[!] Warning: Failed to save Excel file: {e}", file=sys.stderr)
+    finally:
+        _excel_workbook = None
+        _excel_worksheet = None
+        _excel_filename = None
+
+# -------------------------------------------------
 # CSV Helpers (Resume-safe)
 # -------------------------------------------------
 
@@ -50,6 +196,9 @@ def write_csv_header_if_needed(filename: str):
             with open(filename, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
                 writer.writeheader()
+            
+            # Initialize Excel file if available
+            init_excel_file(filename)
         except Exception as e:
             raise ValueError(f"Failed to create CSV file {filename}: {e}")
 
@@ -58,6 +207,9 @@ def append_csv_row(filename: str, row: Dict[str, Any]):
         with open(filename, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
             writer.writerow(row)
+        
+        # Also append to Excel file if available
+        append_excel_row(row)
     except Exception as e:
         # Log error but don't crash - allow scan to continue
         print(f"\n[!] Warning: Failed to write CSV row: {e}", file=sys.stderr)
@@ -438,6 +590,14 @@ def run_scan(url=None, file_path=None, output_file=None, verbose=False):
         completed_count += 3
         update_progress(completed_count, total_test_cases)
 
+    # Save Excel file if it was created
+    excel_file = output_file.replace('.csv', '.xlsx')
+    save_excel_file()
+    
     if verbose:
         print("\n[*] Scan completed successfully")
         print(f"[*] Results stored in {output_file}")
+        if OPENPYXL_AVAILABLE and os.path.exists(excel_file):
+            print(f"[*] Excel file with formatting: {excel_file}")
+        elif not OPENPYXL_AVAILABLE:
+            print("[*] Note: Install 'openpyxl' (pip install openpyxl) for Excel output with proper formatting")
