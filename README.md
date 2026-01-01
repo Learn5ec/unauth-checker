@@ -28,7 +28,6 @@
 - [Troubleshooting](#-troubleshooting)
 - [Security & Ethics](#-security--ethics)
 - [Contributing](#-contributing)
-- [License](#-license)
 
 ---
 
@@ -58,21 +57,24 @@ Perfect for security researchers, penetration testers, and developers who need t
 - ✅ **Resume Capability** - Automatically resumes interrupted scans
 - ✅ **Smart File Versioning** - Auto-generates versioned output files (e.g., `api.example.com.csv`, `api.example.com1.csv`)
 - ✅ **Progress Tracking** - Real-time progress bar with detailed statistics
-- ✅ **Comprehensive CSV Reports** - Includes:
+- ✅ **Comprehensive CSV & Excel Reports** - Includes:
   - Endpoint paths and HTTP methods
   - Parameter counts and values used
   - HTTP status codes received
-  - Full response bodies
+  - Full response bodies (up to 2000 characters)
   - Confidence scores
   - Detailed notes
+  - **Real-time updates** - Both CSV and Excel files update as scan progresses
 
 ### 🎨 Additional Features
 
-- 🔄 **Incremental CSV Writing** - Results saved in real-time
-- 📈 **Confidence Scoring** - Automatic risk assessment
+- 🔄 **Real-time Updates** - Both CSV and Excel files update incrementally as scan progresses
+- 📊 **Professional Excel Formatting** - Auto-generated Excel files with optimized column widths, row heights, and alignment
+- 📈 **Confidence Scoring** - Automatic risk assessment (0-100 scale)
 - 🎯 **Verbose Mode** - Detailed execution logs for debugging
 - 🌐 **URL & File Input** - Support for remote URLs and local files
-- ⚡ **Error Handling** - Graceful failure recovery
+- ⚡ **Error Handling** - Graceful failure recovery with fallback mechanisms
+- 🔁 **Resume Support** - Automatically resumes from where it left off if scan is interrupted
 
 ---
 
@@ -100,14 +102,21 @@ cd unauth-checker
 
 ### Step 2: Install Dependencies
 
+**Required:**
 ```bash
 pip install requests
+```
+
+**Optional (for Excel output with formatting):**
+```bash
+pip install openpyxl
 ```
 
 Or using `pip3`:
 
 ```bash
 pip3 install requests
+pip3 install openpyxl  # Optional, for Excel formatting
 ```
 
 ### Step 3: Set Up Mistral AI API Key
@@ -288,9 +297,11 @@ python3 unauth_checker.py \
    - Saves to CSV with all details
 
 6. **💾 Output Generation**
-   - Creates CSV file with hostname-based naming
-   - Auto-versions files if they already exist
-   - Incrementally writes results (resumable)
+   - Creates both CSV and Excel files (if openpyxl installed)
+   - Hostname-based automatic file naming
+   - Auto-versions files if they already exist (e.g., `hostname.csv`, `hostname1.csv`)
+   - Real-time incremental writing (both CSV and Excel update as scan progresses)
+   - Resume capability - tracks completed test cases to avoid duplicates
 
 ---
 
@@ -314,10 +325,37 @@ The generated CSV file contains the following columns:
 
 ### File Naming
 
-- **Auto-generated:** `{hostname}.csv`
-  - Example: `api-example-com.csv`
+- **Auto-generated:** `{hostname}.csv` and `{hostname}.xlsx` (if openpyxl is installed)
+  - Example: `api-example-com.csv` and `api-example-com.xlsx`
 - **Versioned:** If file exists, creates `{hostname}1.csv`, `{hostname}2.csv`, etc.
 - **Custom:** Use `-o` flag to specify custom filename
+
+### Excel Formatting (Optional)
+
+If `openpyxl` is installed, the tool automatically generates an Excel file (`.xlsx`) alongside the CSV with professional formatting:
+
+- ✅ **Optimized Column Widths** - Precisely sized in centimeters for readability
+- ✅ **Formatted Headers** - Bold white text on blue background, top-aligned
+- ✅ **Text Wrapping** - Long content (responses, parameters) wrap automatically
+- ✅ **Custom Row Heights** - Header row: 0.7 cm, Data rows: 3.85 cm
+- ✅ **Smart Alignment** - Left/center alignment based on column type, response column top-aligned
+- ✅ **Real-time Updates** - Excel file saves after each row (just like CSV)
+- ✅ **Professional Styling** - Ready for presentations and reports
+
+**Column Widths (in cm):**
+- Endpoint: 4.7 cm (left-aligned)
+- Method: 2.5 cm (center-aligned)
+- Params Count: 3.55 cm (center-aligned)
+- Params Values: 5.0 cm (left-aligned, wrapped)
+- Status Codes: 3.25 cm (center-aligned)
+- Response: 11.5 cm (left-aligned, top-aligned, wrapped)
+- Confidence: 2.9 cm (center-aligned)
+- Confidence Level: 4.2 cm (center-aligned)
+- Notes: 5.5 cm (center-aligned in header, left-aligned in data)
+
+**Row Heights:**
+- Header Row: 0.7 cm (top-aligned)
+- Data Rows: 3.85 cm (response column top-aligned, others center-aligned)
 
 ### Confidence Scoring
 
@@ -344,6 +382,7 @@ $ python3 unauth_checker.py -u https://api.example.com/openapi.json
 Progress: [████████████████████████] 450 / 450 endpoints evaluated
 [*] Scan completed successfully
 [*] Results stored in api-example-com.csv
+[*] Excel file with formatting: api-example-com.xlsx
 ```
 
 ### Example 2: Verbose Mode
@@ -433,12 +472,20 @@ export MISTRAL_API_KEY="your-api-key-here"
 - Check Mistral AI service status
 - Tool will fallback to "test" values if AI fails
 
-#### ❌ CSV file not created
+#### ❌ CSV/Excel file not created
 
 **Solution:**
 - Check write permissions in current directory
 - Verify disk space
 - Check if file path is valid
+- For Excel files, ensure `openpyxl` is installed: `pip install openpyxl`
+
+#### ❌ Excel file not updating in real-time
+
+**Solution:**
+- Excel files are saved after each row by default
+- If Excel file appears locked, close it and let the scan complete
+- The file will be properly saved at the end of the scan
 
 ---
 
@@ -475,6 +522,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
+---
 
 ---
 
@@ -486,14 +534,14 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
 
-## 📞 Support
+## 📞 Support & Contact
 
 For issues, questions, or suggestions:
 
 - 🐛 **Bug Reports:** Open an issue on GitHub
 - 💬 **Questions:** Check existing issues or open a new one
 - ⭐ **Show Support:** Star the repository if you find it useful!
-- 🤝 **LinkedIN:** https://www.linkedin.com/in/yash-prajapati-791m18104/
+- 💼 **LinkedIn:** [Yash Prajapati](https://www.linkedin.com/in/yash-prajapati-791m18104/)
 
 ---
 
