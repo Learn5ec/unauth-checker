@@ -1,0 +1,5 @@
+requests>=2.25
+# Optional: --trace also emits an .xlsx alongside the CSV when openpyxl is present.
+openpyxl>=3.0
+# Development / tests
+pytest>=7.0
