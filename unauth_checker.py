@@ -24,6 +24,11 @@ def main():
              "core checker using spec-derived / type-based values, with no API "
              "key required."
     )
+    parser.add_argument(
+        "--methods",
+        help="Comma-separated HTTP methods to test (e.g. 'get,post'). Default: all.",
+        default=None
+    )
 
     args = parser.parse_args()
 
@@ -31,12 +36,15 @@ def main():
         print("[-] Either --url or --file must be provided")
         return
 
+    methods = [m for m in args.methods.split(",")] if args.methods else None
+
     run_scan(
         url=args.url,
         file_path=args.file,
         output_file=args.output,
         verbose=args.verbose,
-        use_ai=not args.skip_ai_params
+        use_ai=not args.skip_ai_params,
+        methods=methods
     )
 
 if __name__ == "__main__":

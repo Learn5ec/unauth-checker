@@ -4,7 +4,7 @@ import sys
 import os
 import re
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from typing import Dict, Any, List, Tuple, Optional
 from ai_agent import AIAgent
 
@@ -303,6 +303,37 @@ def load_openapi(url: str = None, file_path: str = None) -> Tuple[Dict, str]:
 # Endpoint Extraction
 # -------------------------------------------------
 
+def extract_request_body(details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Pull a concrete example/default from an operation's requestBody.
+
+    Returns {"content_type": ..., "value": <python value>} or None. Uses the
+    spec's own example/default (no AI), preferring application/json.
+    """
+    body = details.get("requestBody")
+    if not isinstance(body, dict):
+        return None
+    content = body.get("content", {})
+    if not isinstance(content, dict) or not content:
+        return None
+    # Prefer application/json, else first available media type.
+    ctype = next((c for c in content if "json" in c.lower()), next(iter(content), None))
+    if ctype is None:
+        return None
+    media = content.get(ctype, {})
+    if not isinstance(media, dict):
+        return None
+    value = None
+    if "example" in media:
+        value = media["example"]
+    else:
+        schema = media.get("schema", {})
+        if isinstance(schema, dict):
+            value = schema.get("example", schema.get("default"))
+    if value is None:
+        return None
+    return {"content_type": ctype, "value": value}
+
+
 def extract_endpoints(spec: Dict) -> List[Dict[str, Any]]:
     endpoints = []
 
@@ -312,6 +343,8 @@ def extract_endpoints(spec: Dict) -> List[Dict[str, Any]]:
 
         for method, details in methods.items():
             if not isinstance(details, dict):
+                continue
+            if method.lower() not in ("get", "post", "put", "delete", "patch", "head", "options"):
                 continue
 
             params = []
@@ -332,7 +365,8 @@ def extract_endpoints(spec: Dict) -> List[Dict[str, Any]]:
             endpoints.append({
                 "path": path,
                 "method": method.upper(),
-                "params": params
+                "params": params,
+                "request_body": extract_request_body(details),
             })
 
     return endpoints
@@ -469,12 +503,78 @@ def score_result(statuses: set, response_body: str) -> "tuple[int, str]":
     # 404 / other 4xx -> inconclusive.
     return 10, _level_for(10)
 
-def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=None, use_ai=True):
-    # Ensure base_url ends without slash and path starts with slash
-    base = base_url.rstrip("/")
-    path = endpoint['path'] if endpoint['path'].startswith("/") else f"/{endpoint['path']}"
-    url = f"{base}{path}"
+# -------------------------------------------------
+# Request Building (path/query/header/body routing)
+# -------------------------------------------------
 
+BODY_METHODS = {"POST", "PUT", "PATCH"}
+
+def build_request(endpoint, sample, base_url, extra_headers=None, send_body=True):
+    """Assemble method/url/query/headers/body for one probe, routing each
+    parameter to its OpenAPI `in` location.
+
+    - path params are substituted into the URL (always filled, even in the
+      empty case, so the request reaches the concrete route instead of a
+      literal `/…/{id}/…`).
+    - query params respect the sample (omitted in the empty case).
+    - header / cookie params are sent as headers.
+    - requestBody example/default is sent as a JSON body for POST/PUT/PATCH.
+    """
+    base = base_url.rstrip("/")
+    path = endpoint["path"]
+    if not path.startswith("/"):
+        path = "/" + path
+
+    query = {}
+    headers = dict(extra_headers or {})
+    cookie_parts = []
+
+    for p in endpoint["params"]:
+        name = p.get("name")
+        if not name:
+            continue
+        loc = (p.get("in") or "").lower()
+        value = sample.get(name) if sample else None
+
+        if loc == "path":
+            # Always substitute path params; fall back to the spec value so the
+            # concrete route is reachable.
+            if value is None:
+                value = heuristic_value(p)
+            path = path.replace("{" + str(name) + "}", quote(str(value), safe=""))
+        elif value is None:
+            continue
+        elif loc == "query":
+            query[name] = value
+        elif loc == "header":
+            headers[name] = value
+        elif loc == "cookie":
+            cookie_parts.append(f"{name}={value}")
+
+    if cookie_parts:
+        existing = headers.get("Cookie", "")
+        headers["Cookie"] = "; ".join(([existing] if existing else []) + cookie_parts)
+
+    # Any unsubstituted {placeholders} left? Signal so callers can mark the probe
+    # unreliable rather than treating a literal-brace 4xx as "protected".
+    has_unresolved = "{" in path and "}" in path
+
+    # requestBody example/default is independent of the query-param sample:
+    # send it whenever the method takes a body and the spec provides one.
+    body_json = None
+    if send_body and endpoint.get("method") in BODY_METHODS and endpoint.get("request_body"):
+        body_json = endpoint["request_body"]["value"]
+
+    return {
+        "method": endpoint["method"],
+        "url": f"{base}{path}",
+        "params": query,
+        "headers": headers,
+        "json": body_json,
+        "has_unresolved_path": has_unresolved,
+    }
+
+def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=None, use_ai=True):
     params_count = len(endpoint["params"])
 
     if verbose:
@@ -511,12 +611,18 @@ def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=N
             print(f"    [*] Test case {case_idx}/{len(test_cases)}: {label}")
 
         try:
+            req = build_request(endpoint, params, base_url)
             r = requests.request(
-                endpoint["method"],
-                url,
-                params=params,
-                timeout=10
+                req["method"],
+                req["url"],
+                params=req["params"] or None,
+                headers=req["headers"] or None,
+                json=req["json"],
+                timeout=10,
             )
+
+            if req["has_unresolved_path"] and verbose:
+                print("        [!] Unresolved path placeholder in URL — result may be unreliable")
 
             statuses.add(r.status_code)
             # Capture response body (cleaned/truncated for CSV)
@@ -618,9 +724,14 @@ def _expected_case_count(ep: Dict[str, Any], use_ai: bool) -> int:
     return 3 if use_ai else 2
 
 
-def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=True):
+def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=True, methods=None):
     spec, base_url = load_openapi(url, file_path)
     endpoints = extract_endpoints(spec)
+
+    if methods:
+        allowed = {m.strip().upper() for m in methods if m.strip()}
+        endpoints = [e for e in endpoints if e["method"] in allowed]
+
     total = len(endpoints)
 
     # Generate output filename from hostname if not provided
