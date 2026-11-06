@@ -7,7 +7,10 @@ import requests
 from urllib.parse import urlparse, quote
 from typing import Dict, Any, List, Tuple, Optional
 from ai_agent import AIAgent
-from ratelimit import SafeHTTP, RateLimitedExhausted, RATE_LIMITED
+from ratelimit import SafeHTTP, RateLimitedExhausted
+from models import Probe, UNAUTH, USER, ADMIN, RATE_LIMITED, ERROR
+import decision
+import reporting
 
 # Try to import openpyxl for Excel generation, make it optional
 try:
@@ -575,101 +578,96 @@ def build_request(endpoint, sample, base_url, extra_headers=None, send_body=True
         "has_unresolved_path": has_unresolved,
     }
 
-def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=None, use_ai=True, http=None):
-    params_count = len(endpoint["params"])
+# -------------------------------------------------
+# Header parsing (authorization tiers)
+# -------------------------------------------------
 
+def parse_header(s: str):
+    """Parse a -x/-a header value into (name, value).
+
+    Supports a full `Name: value` form and bare tokens/cookies:
+      - "Authorization: Bearer eyJ…" / "Cookie: a=1;b=2" / "X-API-Key: k" -> as-is
+      - bare "eyJ…" / "Bearer …" / "Token …" / token -> Authorization: Bearer <v>
+      - value containing '=' and ';' -> Cookie: <v>
+    """
+    s = (s or "").strip()
+    if ":" in s:
+        name, _, value = s.partition(":")
+        name = name.strip()
+        value = value.strip()
+        if name and value:
+            return name, value
+    # Bare-value fallbacks.
+    if s[:7].lower() == "bearer " or s[:6].lower() == "token ":
+        return "Authorization", s
+    if s.startswith("eyJ") or ("=" in s and ";" in s):
+        if "=" in s and ";" in s:
+            return "Cookie", s
+        return "Authorization", "Bearer " + s
+    return "Authorization", "Bearer " + s
+
+
+def _probe_once(endpoint, params, base_url, tier, params_str, headers, http, verbose):
+    """Fire a single request at one tier and return a Probe (never raises)."""
+    probe = Probe(endpoint["path"], endpoint["method"], params_str, tier, status=ERROR)
+    try:
+        req = build_request(endpoint, params, base_url, extra_headers=headers or None)
+        sender = http or requests
+        r = sender.request(
+            req["method"], req["url"],
+            params=req["params"] or None,
+            headers=req["headers"] or None,
+            json=req["json"],
+            timeout=10,
+        )
+        probe.status = r.status_code
+        text = r.text or ""
+        probe.body_len = len(text)
+        probe.body_norm = text[:50000]
+        probe.sample = clean_response_body(text, limit=1000)
+        probe.headers = dict(r.headers)
+        if req["has_unresolved_path"] and verbose:
+            print("        [!] Unresolved path placeholder in URL — result may be unreliable")
+        if verbose:
+            print(f"        → [{tier}] {r.status_code} ({len(text)}B)")
+    except RateLimitedExhausted as e:
+        probe.status = RATE_LIMITED
+        probe.error = str(e)
+        if verbose:
+            print(f"        → [{tier}] rate-limited (retries exhausted)")
+    except requests.RequestException as e:
+        probe.status = ERROR
+        probe.error = str(e)
+        if verbose:
+            print(f"        → [{tier}] ERROR: {e}")
+    return probe
+
+
+def probe_endpoint(endpoint, base_url, samples, active_tiers, tier_headers,
+                   use_ai, http, verbose, index, total):
+    """Probe an endpoint across all active authorization tiers, returning Probes."""
+    params_count = len(endpoint["params"])
     if verbose:
         print(f"\n[+] Testing endpoint ({index}/{total}): {endpoint['method']} {endpoint['path']}")
-        params_list = [p["name"] for p in endpoint["params"]]
-        print(f"    Detected parameters ({params_count}): {', '.join(params_list) if params_list else 'None'}")
+        names = [p["name"] for p in endpoint["params"]]
+        print(f"    Parameters ({params_count}): {', '.join(names) if names else 'None'} | tiers: {','.join(active_tiers)}")
 
-    # Reuse pre-computed samples when provided (avoids a second, mismatched
-    # generation in the resume path). Otherwise generate here.
     if samples is None:
         samples = generate_param_samples(endpoint, use_ai=use_ai)
 
-    # Test up to 3 times: empty params, set 1, set 2
     test_cases = [({}, "empty")]
-
-    if samples and len(samples) > 0:
+    if samples:
         test_cases.append((samples[0], "set_1"))
-    if samples and len(samples) > 1:
+    if len(samples) > 1:
         test_cases.append((samples[1], "set_2"))
 
-    if verbose:
-        if params_count > 0:
-            source = "Agent" if use_ai else "Heuristic (no AI)"
-            print(f"    [*] {source} generated {len(samples) * params_count} sample value(s)")
-        print(f"    [*] Testing {len(test_cases)} cases: empty params + {len(samples)} sample sets")
-
-    for case_idx, (params, case_name) in enumerate(test_cases, 1):
-        statuses = set()
+    probes = []
+    for params, _case in test_cases:
         params_str = format_params_values(params)
-        response_body = ""
-        
-        if verbose:
-            label = "Empty parameters" if case_name == "empty" else f"{case_name} - {params_str}"
-            print(f"    [*] Test case {case_idx}/{len(test_cases)}: {label}")
-
-        try:
-            req = build_request(endpoint, params, base_url)
-            sender = http or requests
-            r = sender.request(
-                req["method"],
-                req["url"],
-                params=req["params"] or None,
-                headers=req["headers"] or None,
-                json=req["json"],
-                timeout=10,
-            )
-
-            if req["has_unresolved_path"] and verbose:
-                print("        [!] Unresolved path placeholder in URL — result may be unreliable")
-
-            statuses.add(r.status_code)
-            # Capture response body (cleaned/truncated for CSV)
-            response_body = clean_response_body(r.text, limit=2000)  # Increased limit for CSV
-
-            if verbose:
-                print(f"        → Status: {r.status_code}")
-                print("        → Response:")
-                print(clean_response_body(r.text))
-
-        except RateLimitedExhausted as e:
-            # Throttled and retries exhausted: NOT a result — do not let a 429
-            # masquerade as a protected/200 verdict. Recorded distinctly.
-            if verbose:
-                print(f"        [!] Rate-limited, retries exhausted: {e}")
-            statuses.add(RATE_LIMITED)
-            response_body = "Rate-limited; retries exhausted (unverified)"
-
-        except requests.RequestException as e:
-            if verbose:
-                print(f"        [!] Error: {e}")
-            statuses.add("ERROR")
-            response_body = f"Request Error: {str(e)}"
-
-        confidence, confidence_level = score_result(statuses, response_body)
-        if RATE_LIMITED in statuses:
-            confidence, confidence_level = 0, "UNVERIFIED"
-
-        result = {
-            "endpoint": endpoint["path"],
-            "method": endpoint["method"],
-            "params_count": params_count,
-            "params_values": params_str,
-            "status_codes": ",".join(map(str, sorted(statuses))) if statuses else "N/A",
-            "response": response_body,
-            "confidence": confidence,
-            "confidence_level": confidence_level,
-            "notes": f"Test case: {case_name}"
-        }
-
-        append_csv_row(csv_file, result)
-
-    if verbose:
-        print("    [+] Endpoint evaluation completed")
-        print(f"    [+] {len(test_cases)} result(s) appended to CSV")
+        for tier in active_tiers:
+            headers = dict(tier_headers.get(tier) or {})
+            probes.append(_probe_once(endpoint, params, base_url, tier, params_str, headers, http, verbose))
+    return probes
 
 # -------------------------------------------------
 # File Versioning
@@ -738,7 +736,8 @@ def _expected_case_count(ep: Dict[str, Any], use_ai: bool) -> int:
 
 def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=True, methods=None,
              max_rps=5.0, min_interval=0.05, rate_margin=2, max_retries=4, cooldown_cap=120.0,
-             adaptive=True, respect_retry_after=True):
+             adaptive=True, respect_retry_after=True, tiers=None, trace=False,
+             sim_strong=0.90, sim_shape=0.60):
     spec, base_url = load_openapi(url, file_path)
     endpoints = extract_endpoints(spec)
 
@@ -748,82 +747,70 @@ def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=T
 
     total = len(endpoints)
 
-    # Generate output filename from hostname if not provided
+    # Authorization tiers. A tier is probed only if its headers were supplied;
+    # the unauthenticated tier is always present.
+    tier_headers = {}
+    if tiers:
+        if tiers.get("user"):
+            tier_headers[USER] = dict(tiers["user"])
+        if tiers.get("admin"):
+            tier_headers[ADMIN] = dict(tiers["admin"])
+    active_tiers = [UNAUTH] + [t for t in (USER, ADMIN) if t in tier_headers]
+    has_user = USER in tier_headers
+    has_admin = ADMIN in tier_headers
+
+    # Output paths: findings (signal only) always; full trace only on request.
     if output_file is None:
-        hostname = extract_hostname_from_url(base_url)
-        output_file = f"{hostname}.csv"
-
-    # Get versioned filename
-    output_file = get_versioned_filename(output_file)
-
-    write_csv_header_if_needed(output_file)
-    completed = load_completed_endpoints(output_file)
-
-    if verbose:
-        print("[*] OpenAPI loaded successfully")
-        print(f"[*] Base URL: {base_url}")
-        print(f"[*] Total endpoints detected: {total}")
-        print(f"[*] Output file: {output_file}")
-        mode = "AI parameter generation" if use_ai else "AI skipped (--skip-ai-params)"
-        print(f"[*] Mode: {mode}")
-        print(f"[*] Resuming scan, {len(completed)} test cases already completed\n")
-
-    completed_count = len(completed)
-    total_test_cases = sum(_expected_case_count(ep, use_ai) for ep in endpoints) or 1
+        output_file = f"{extract_hostname_from_url(base_url)}.csv"
+    base_name, _ext = os.path.splitext(output_file)
+    findings_file = base_name + ".findings.csv"
+    trace_file = base_name + ".trace.csv"
 
     http = SafeHTTP(
         max_rps=max_rps, min_interval=min_interval, rate_margin=rate_margin,
         max_retries=max_retries, cooldown_cap=cooldown_cap, adaptive=adaptive,
         respect_retry_after=respect_retry_after,
     )
-
-    for ep_idx, ep in enumerate(endpoints, 1):
-        # Generate samples once and reuse them for both the resume-key check and
-        # the actual requests. Calling generate_param_samples twice (as before)
-        # both doubled AI cost and, because AI output is non-deterministic, made
-        # the resume keys never match what was about to be written.
-        samples = generate_param_samples(ep, use_ai=use_ai)
-
-        empty_key = f"{ep['method']} {ep['path']} {{}}"
-        set_keys = [
-            f"{ep['method']} {ep['path']} {format_params_values(s)}" for s in samples
-        ]
-        all_keys = [empty_key] + set_keys
-
-        # Only skip when every test case for this endpoint is already done.
-        if all(k in completed for k in all_keys):
-            completed_count += len(all_keys)
-            update_progress(completed_count, total_test_cases)
-            continue
-
-        test_endpoint(
-            ep,
-            base_url,
-            output_file,
-            ep_idx,
-            total,
-            verbose,
-            samples=samples,
-            use_ai=use_ai,
-            http=http
-        )
-        completed_count += len(all_keys)
-        update_progress(completed_count, total_test_cases)
-
-    # Save Excel file if it was created
-    excel_file = output_file.replace('.csv', '.xlsx')
-    save_excel_file()
-    http.close()
+    opts = {"sim_strong": sim_strong, "sim_shape": sim_shape,
+            "has_user": has_user, "has_admin": has_admin}
 
     if verbose:
-        print("\n[*] Scan completed successfully")
-        print(f"[*] Results stored in {output_file}")
-        if http.throttle_hits:
-            print(
-                f"[*] Rate-limit stats: {http.throttle_hits} throttle hit(s), "
-                f"{http.retries_done} retry/re-run(s), {http.unverified} unverified after retries"
-            )
-        if OPENPYXL_AVAILABLE and os.path.exists(excel_file):
-            print(f"[*] Excel file with formatting: {excel_file}")
-        elif not OPENPYXL_AVAILABLE:
-            print("[*] Note: Install 'openpyxl' (pip install openpyxl) for Excel output with proper formatting")
+        print("[*] OpenAPI loaded successfully")
+        print(f"[*] Base URL: {base_url}")
+        print(f"[*] Total endpoints detected: {total}")
+        print(f"[*] Mode: {'AI' if use_ai else 'no-AI (--skip-ai-params)'} | tiers: {','.join(active_tiers)}")
+
+    all_probes = []
+    all_verdicts = []
+    for ep_idx, ep in enumerate(endpoints, 1):
+        samples = generate_param_samples(ep, use_ai=use_ai)
+        probes = probe_endpoint(
+            ep, base_url, samples, active_tiers, tier_headers,
+            use_ai, http, verbose, ep_idx, total
+        )
+        all_probes.extend(probes)
+
+        # Decide per param-set, across whatever tiers were probed.
+        groups = {}
+        for p in probes:
+            groups.setdefault(p.params_values, []).append(p)
+        for _pv, grp in groups.items():
+            all_verdicts.append(decision.decide(grp, opts))
+            bfla = decision.bfla_verdict(grp, opts)
+            if bfla:
+                all_verdicts.append(bfla)
+
+        update_progress(ep_idx, total)
+
+    http.close()
+
+    reporting.write_findings(findings_file, all_verdicts)
+    if trace:
+        reporting.write_trace(trace_file, all_probes)
+
+    reporting.console_summary(all_verdicts, http, findings_file)
+    if trace:
+        extra = " (+ .xlsx)" if reporting.OPENPYXL else ""
+        print(f"Full trace -> {trace_file}{extra}")
+
+    return all_verdicts

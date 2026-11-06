@@ -6,6 +6,7 @@ whole tool lives here: a finding is a COMPARISON across tiers, and a response
 is only trusted once it is not rate-limited.
 """
 
+import re
 from models import Probe, Verdict, UNAUTH, USER, ADMIN, RATE_LIMITED, ERROR
 import similarity as sim
 
@@ -15,6 +16,20 @@ _DEFAULTS = {
     "has_user": False,    # a --user-header was configured
     "has_admin": False,   # an --admin-header was configured
 }
+
+# Endpoint-scope hints that a route is meant to be privileged. BFLA is only a
+# signal when the endpoint looks admin-scoped AND unauth was rejected; otherwise
+# "user == admin" is just a self-service/shared endpoint both roles can use.
+_PRIVILEGED_SCOPE = re.compile(
+    r"(?:^|[/_.-])(admin|administrator|manage|management|superuser|superuser"
+    r"|root|internal|privileged|privilege|audit|backoffice|back-office|moderat"
+    r"|system|config|settings|roles?|permissions?|impersonat)(?:$|[/_.-])",
+    re.IGNORECASE,
+)
+
+
+def _looks_privileged(endpoint, method=""):
+    return bool(_PRIVILEGED_SCOPE.search(endpoint or ""))
 
 
 def _tier(probes, name):
@@ -127,14 +142,27 @@ def bfla_verdict(probes, opts=None):
     opts = {**_DEFAULTS, **(opts or {})}
     us = _tier(probes, USER)
     ad = _tier(probes, ADMIN)
+    u = _tier(probes, UNAUTH)
     if not (us and ad and us.ok and ad.ok):
         return None
+
+    # A privilege boundary must actually exist: unauth is rejected. If unauth
+    # already succeeds this is an open-exposure / auth-bypass (handled by
+    # decide()), not a user->admin escalation.
+    if u is None or u.status not in (401, 403):
+        return None
+
+    # And the endpoint must look admin-scoped — otherwise a normal user and an
+    # admin both reaching it is expected (self-service / shared data).
+    if not _looks_privileged(us.endpoint, us.method):
+        return None
+
     s = _similarity(us, ad)
     if s is not None and s >= opts["sim_strong"]:
         return Verdict(
             endpoint=us.endpoint, method=us.method, params_values=us.params_values,
             category="BFLA-PRIVESC", confidence=88, level=_levels(88), signal=True,
-            evidence=f"user {us.status} == admin {ad.status} (sim {s:.2f})",
+            evidence=f"unauth {u.status} but user {us.status} == admin {ad.status} (sim {s:.2f})",
             tiers={p.tier: p.status for p in probes}, similarity=s,
         )
     return None
