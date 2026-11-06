@@ -316,10 +316,17 @@ def extract_endpoints(spec: Dict) -> List[Dict[str, Any]]:
 
             params = []
             for p in details.get("parameters", []):
+                if not isinstance(p, dict):
+                    continue
+                schema = p.get("schema", {}) if isinstance(p.get("schema"), dict) else {}
                 params.append({
                     "name": p.get("name"),
-                    "type": p.get("schema", {}).get("type", "string"),
-                    "description": p.get("description", "")
+                    "in": p.get("in", ""),
+                    "type": schema.get("type", p.get("type", "string")),
+                    "description": p.get("description", ""),
+                    "example": schema.get("example", p.get("example")),
+                    "default": schema.get("default", p.get("default")),
+                    "enum": schema.get("enum", p.get("enum")),
                 })
 
             endpoints.append({
@@ -331,21 +338,55 @@ def extract_endpoints(spec: Dict) -> List[Dict[str, Any]]:
     return endpoints
 
 # -------------------------------------------------
-# AI Sample Generation (Max 2 sets)
+# Sample Generation (AI or heuristic, Max 2 sets)
 # -------------------------------------------------
 
-def generate_param_samples(endpoint: Dict[str, Any]) -> List[Dict[str, str]]:
+# Type-based fallback values used when AI generation is skipped or fails.
+# Also used as the sole source of samples under --skip-ai-params.
+TYPE_FALLBACK = {
+    "integer": "1",
+    "number": "1.0",
+    "boolean": "true",
+    "string": "test",
+    "array": "[]",
+    "object": "{}",
+}
+
+def heuristic_value(p: Dict[str, Any]) -> str:
+    """Derive a sample value from the OpenAPI spec alone (no AI call)."""
+    for key in ("example", "default"):
+        if p.get(key) not in (None, ""):
+            return str(p[key])
+    if p.get("enum"):
+        return str(p["enum"][0])
+    return TYPE_FALLBACK.get(p.get("type", "string"), "test")
+
+def generate_param_samples(endpoint: Dict[str, Any], use_ai: bool = True) -> List[Dict[str, str]]:
+    """Build up to 2 parameter sets to exercise an endpoint.
+
+    When use_ai is False (i.e. --skip-ai-params), no AI/agent call is made at
+    all; values come from the spec (example/default/enum) or type-based
+    fallbacks, so no API key of any kind is required.
+    """
     if not endpoint["params"]:
-        return [{}]
+        # Parameterless endpoint: only the empty test case applies. Returning []
+        # (rather than [{}]) avoids sending the empty request a second time as a
+        # duplicate "set_1" case.
+        return []
+
+    if not use_ai:
+        return [{p["name"]: heuristic_value(p) for p in endpoint["params"]}]
 
     agent = get_agent()
     samples = []
     for _ in range(2):
         sample = {}
         for p in endpoint["params"]:
-            sample[p["name"]] = agent.generate_sample_value(
-                p["type"], p["name"], p["description"]
-            )
+            value = agent.generate_sample_value(p["type"], p["name"], p["description"])
+            # If the model failed and returned the placeholder, fall back to the spec.
+            if value == "test":
+                value = heuristic_value(p)
+            sample[p["name"]] = value
         samples.append(sample)
 
     return samples
@@ -381,34 +422,83 @@ def format_params_values(params: Dict[str, str]) -> str:
         return "{}"
     return json.dumps(params, sort_keys=True)
 
-def test_endpoint(endpoint, base_url, csv_file, index, total, verbose):
+# Response statuses that indicate the endpoint is clearly protected / not
+# reachable without auth — these are scored as Inconclusive regardless of body.
+PROTECTED_STATUSES = {401, 403}
+
+def _level_for(score: int) -> str:
+    if score >= 80:
+        return "High"
+    if score >= 50:
+        return "Medium"
+    if score >= 20:
+        return "Low"
+    return "Inconclusive"
+
+def score_result(statuses: set, response_body: str) -> "tuple[int, str]":
+    """Grade a single test-case result into (confidence, level).
+
+    Mirrors the README bands (80-100 High, 50-79 Medium, 20-49 Low, 0-19
+    Inconclusive) instead of the previous 0-or-60-only behaviour.
+    """
+    if "ERROR" in statuses or not statuses:
+        return 0, "Inconclusive"
+
+    # A single request yields one status; take the most informative one.
+    code = max(statuses) if isinstance(next(iter(statuses)), int) else 0
+
+    # Explicitly protected -> no unauth access demonstrated.
+    if code in PROTECTED_STATUSES:
+        return 0, "Inconclusive"
+
+    # 2xx with a real payload -> strong indication of unauthenticated access.
+    if 200 <= code < 300:
+        body = (response_body or "").strip()
+        if not body or body == "<empty response>":
+            return 45, _level_for(45)  # reachable but returned nothing useful
+        return 85, _level_for(85)
+
+    # Server error -> endpoint is reachable pre-auth (handler ran) but failed.
+    if 500 <= code < 600:
+        return 35, _level_for(35)
+
+    # Redirects often bounce to a login page -> weak signal.
+    if 300 <= code < 400:
+        return 25, _level_for(25)
+
+    # 404 / other 4xx -> inconclusive.
+    return 10, _level_for(10)
+
+def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=None, use_ai=True):
     # Ensure base_url ends without slash and path starts with slash
     base = base_url.rstrip("/")
     path = endpoint['path'] if endpoint['path'].startswith("/") else f"/{endpoint['path']}"
     url = f"{base}{path}"
-    
+
     params_count = len(endpoint["params"])
-    
+
     if verbose:
         print(f"\n[+] Testing endpoint ({index}/{total}): {endpoint['method']} {endpoint['path']}")
         params_list = [p["name"] for p in endpoint["params"]]
         print(f"    Detected parameters ({params_count}): {', '.join(params_list) if params_list else 'None'}")
 
-    # Generate 2 sets of parameter samples
-    samples = generate_param_samples(endpoint)
-    
-    # Test 3 times: empty params, set 1, set 2
+    # Reuse pre-computed samples when provided (avoids a second, mismatched
+    # generation in the resume path). Otherwise generate here.
+    if samples is None:
+        samples = generate_param_samples(endpoint, use_ai=use_ai)
+
+    # Test up to 3 times: empty params, set 1, set 2
     test_cases = [({}, "empty")]
-    
+
     if samples and len(samples) > 0:
         test_cases.append((samples[0], "set_1"))
     if samples and len(samples) > 1:
         test_cases.append((samples[1], "set_2"))
-    
+
     if verbose:
-        print(f"    [*] Agent generating sample values...")
         if params_count > 0:
-            print(f"    [*] {len(samples) * params_count} sample values created")
+            source = "Agent" if use_ai else "Heuristic (no AI)"
+            print(f"    [*] {source} generated {len(samples) * params_count} sample value(s)")
         print(f"    [*] Testing {len(test_cases)} cases: empty params + {len(samples)} sample sets")
 
     for case_idx, (params, case_name) in enumerate(test_cases, 1):
@@ -417,10 +507,8 @@ def test_endpoint(endpoint, base_url, csv_file, index, total, verbose):
         response_body = ""
         
         if verbose:
-            if case_name == "empty":
-                print(f"    [*] Test case {case_idx}/3: Empty parameters")
-            else:
-                print(f"    [*] Test case {case_idx}/3: {case_name} - {params_str}")
+            label = "Empty parameters" if case_name == "empty" else f"{case_name} - {params_str}"
+            print(f"    [*] Test case {case_idx}/{len(test_cases)}: {label}")
 
         try:
             r = requests.request(
@@ -445,8 +533,7 @@ def test_endpoint(endpoint, base_url, csv_file, index, total, verbose):
             statuses.add("ERROR")
             response_body = f"Request Error: {str(e)}"
 
-        confidence = 60 if 200 in statuses else 0
-        confidence_level = "Medium" if 200 in statuses else "Inconclusive"
+        confidence, confidence_level = score_result(statuses, response_body)
 
         result = {
             "endpoint": endpoint["path"],
@@ -524,7 +611,14 @@ def get_versioned_filename(base_filename: str) -> str:
 # Scan Runner (Resume-aware)
 # -------------------------------------------------
 
-def run_scan(url=None, file_path=None, output_file=None, verbose=False):
+def _expected_case_count(ep: Dict[str, Any], use_ai: bool) -> int:
+    """How many test cases an endpoint yields: empty + (2 AI sets or 1 heuristic set)."""
+    if not ep["params"]:
+        return 1
+    return 3 if use_ai else 2
+
+
+def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=True):
     spec, base_url = load_openapi(url, file_path)
     endpoints = extract_endpoints(spec)
     total = len(endpoints)
@@ -533,10 +627,10 @@ def run_scan(url=None, file_path=None, output_file=None, verbose=False):
     if output_file is None:
         hostname = extract_hostname_from_url(base_url)
         output_file = f"{hostname}.csv"
-    
+
     # Get versioned filename
     output_file = get_versioned_filename(output_file)
-    
+
     write_csv_header_if_needed(output_file)
     completed = load_completed_endpoints(output_file)
 
@@ -545,36 +639,29 @@ def run_scan(url=None, file_path=None, output_file=None, verbose=False):
         print(f"[*] Base URL: {base_url}")
         print(f"[*] Total endpoints detected: {total}")
         print(f"[*] Output file: {output_file}")
+        mode = "AI parameter generation" if use_ai else "AI skipped (--skip-ai-params)"
+        print(f"[*] Mode: {mode}")
         print(f"[*] Resuming scan, {len(completed)} test cases already completed\n")
 
     completed_count = len(completed)
-    total_test_cases = total * 3  # Each endpoint has 3 test cases
+    total_test_cases = sum(_expected_case_count(ep, use_ai) for ep in endpoints) or 1
 
     for ep_idx, ep in enumerate(endpoints, 1):
-        # Test endpoint with 3 cases (empty, set1, set2)
-        # Check if all 3 cases are completed
+        # Generate samples once and reuse them for both the resume-key check and
+        # the actual requests. Calling generate_param_samples twice (as before)
+        # both doubled AI cost and, because AI output is non-deterministic, made
+        # the resume keys never match what was about to be written.
+        samples = generate_param_samples(ep, use_ai=use_ai)
+
         empty_key = f"{ep['method']} {ep['path']} {{}}"
-        set1_key = None
-        set2_key = None
-        
-        if ep["params"]:
-            samples = generate_param_samples(ep)
-            if samples:
-                set1_key = f"{ep['method']} {ep['path']} {format_params_values(samples[0])}"
-            if len(samples) > 1:
-                set2_key = f"{ep['method']} {ep['path']} {format_params_values(samples[1])}"
-        
-        # Check if all test cases are completed
-        all_completed = empty_key in completed
-        if set1_key:
-            all_completed = all_completed and (set1_key in completed)
-        if set2_key:
-            all_completed = all_completed and (set2_key in completed)
-        
-        if all_completed:
-            # Count completed test cases for progress
-            test_case_count = 1 + (1 if set1_key else 0) + (1 if set2_key else 0)
-            completed_count += test_case_count
+        set_keys = [
+            f"{ep['method']} {ep['path']} {format_params_values(s)}" for s in samples
+        ]
+        all_keys = [empty_key] + set_keys
+
+        # Only skip when every test case for this endpoint is already done.
+        if all(k in completed for k in all_keys):
+            completed_count += len(all_keys)
             update_progress(completed_count, total_test_cases)
             continue
 
@@ -584,10 +671,11 @@ def run_scan(url=None, file_path=None, output_file=None, verbose=False):
             output_file,
             ep_idx,
             total,
-            verbose
+            verbose,
+            samples=samples,
+            use_ai=use_ai
         )
-        # Each endpoint adds 3 test cases
-        completed_count += 3
+        completed_count += len(all_keys)
         update_progress(completed_count, total_test_cases)
 
     # Save Excel file if it was created

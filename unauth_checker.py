@@ -17,6 +17,13 @@ def main():
         action="store_true",
         help="Show execution progress and runtime activity"
     )
+    parser.add_argument(
+        "--skip-ai-params",
+        action="store_true",
+        help="Skip AI-generated parameter values (ai_agent.py). Runs only the "
+             "core checker using spec-derived / type-based values, with no API "
+             "key required."
+    )
 
     args = parser.parse_args()
 
@@ -28,7 +35,8 @@ def main():
         url=args.url,
         file_path=args.file,
         output_file=args.output,
-        verbose=args.verbose
+        verbose=args.verbose,
+        use_ai=not args.skip_ai_params
     )
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.6+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Mistral AI](https://img.shields.io/badge/Powered%20by-Mistral%20AI-orange.svg)](https://mistral.ai/)
+[![Anthropic Claude](https://img.shields.io/badge/Powered%20by-Claude%20(Anthropic)-blueviolet.svg)](https://www.anthropic.com/)
 
 *Automatically discover unauthenticated API endpoints using OpenAPI specifications and AI-generated test parameters*
 
@@ -36,7 +36,7 @@
 **Unauth-Checker** is an intelligent security testing tool that automatically identifies unauthenticated API endpoints by:
 
 - 📥 Parsing OpenAPI/Swagger specifications
-- 🤖 Using **Mistral AI** to generate realistic parameter values
+- 🤖 Using **Claude (Anthropic)** to generate realistic parameter values
 - 🧪 Testing endpoints with multiple parameter combinations
 - 📊 Generating detailed CSV reports with response analysis
 
@@ -49,7 +49,7 @@ Perfect for security researchers, penetration testers, and developers who need t
 ### 🚀 Core Capabilities
 
 - ✅ **OpenAPI 2.0 & 3.0+ Support** - Works with both Swagger and OpenAPI specifications
-- ✅ **AI-Powered Parameter Generation** - Uses Mistral AI to create realistic test values
+- ✅ **AI-Powered Parameter Generation** - Uses Claude (Anthropic) to create realistic test values (or `--skip-ai-params` for spec-derived values with no key)
 - ✅ **Triple Testing Strategy** - Tests each endpoint with:
   - Empty parameters
   - First AI-generated parameter set
@@ -83,7 +83,9 @@ Perfect for security researchers, penetration testers, and developers who need t
 Before installing Unauth-Checker, ensure you have:
 
 - **Python 3.6+** installed on your system
-- **Mistral AI API Key** ([Get one here](https://console.mistral.ai/))
+- **Anthropic/Claude credentials** — the tool reuses the ones already configured
+  for Claude Code in `~/.claude/settings.json` (no separate key needed). Only
+  needed for AI parameter generation; use `--skip-ai-params` to run without them.
 - **Internet connection** (for API calls and fetching OpenAPI specs)
 
 ---
@@ -119,33 +121,30 @@ pip3 install requests
 pip3 install openpyxl  # Optional, for Excel formatting
 ```
 
-### Step 3: Set Up Mistral AI API Key
+### Step 3: Credentials
 
-**Option A: Environment Variable (Recommended)**
+**No separate API key setup is required.** The parameter-generation agent reads
+the Anthropic credentials already configured for Claude Code from
+`~/.claude/settings.json` (the `env` block: `ANTHROPIC_AUTH_TOKEN`,
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`).
 
-```bash
-# Linux/macOS
-export MISTRAL_API_KEY="your-mistral-api-key-here"
-
-# Windows (PowerShell)
-$env:MISTRAL_API_KEY="your-mistral-api-key-here"
-
-# Windows (CMD)
-set MISTRAL_API_KEY=your-mistral-api-key-here
-```
-
-**Option B: Add to `.bashrc` or `.zshrc` (Linux/macOS)**
+You can still override via environment variables if you prefer:
 
 ```bash
-echo 'export MISTRAL_API_KEY="your-mistral-api-key-here"' >> ~/.bashrc
-source ~/.bashrc
+export ANTHROPIC_API_KEY="sk-ant-..."        # or ANTHROPIC_AUTH_TOKEN
+export ANTHROPIC_BASE_URL="https://api.anthropic.com"   # optional
+export ANTHROPIC_MODEL="claude-sonnet-5"                # optional
 ```
 
-**Option C: Create `.env` file (if using python-dotenv)**
+**Or skip AI entirely** (no key of any kind) with `--skip-ai-params`:
 
 ```bash
-echo "MISTRAL_API_KEY=your-mistral-api-key-here" > .env
+python3 unauth_checker.py -u https://api.example.com/openapi.json --skip-ai-params
 ```
+
+In this mode values come from the OpenAPI spec itself (`example` / `default` /
+`enum`) or from type-based fallbacks — only the core checker runs, `ai_agent.py`
+is never called.
 
 ### Step 4: Verify Installation
 
@@ -153,33 +152,37 @@ echo "MISTRAL_API_KEY=your-mistral-api-key-here" > .env
 python3 unauth_checker.py --help
 ```
 
-You should see the help menu. If you get an error about missing `MISTRAL_API_KEY`, make sure you've set the environment variable correctly.
+You should see the help menu. If you get an error about missing credentials, either configure Claude Code's `~/.claude/settings.json` or pass `--skip-ai-params`.
 
 ---
 
 ## ⚙️ Configuration
 
-### Mistral AI Setup
+### AI Provider (Claude / Anthropic)
 
-1. **Get Your API Key:**
-   - Visit [Mistral AI Console](https://console.mistral.ai/)
-   - Sign up or log in
-   - Navigate to API Keys section
-   - Create a new API key
+The parameter-generation agent (`ai_agent.py`) uses the Anthropic **Messages
+API** (`/v1/messages`). Credentials are resolved in this order:
 
-2. **Model Used:**
-   - Default: `mistral-small-latest`
-   - Can be modified in `ai_agent.py` if needed
+1. Environment variables (`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`)
+2. The `env` block in `~/.claude/settings.json` (what Claude Code uses)
+3. Defaults
 
-3. **API Endpoint:**
-   - Default: `https://api.mistral.ai/v1/chat/completions`
-   - No configuration needed unless using custom endpoint
+- **Base URL:** `ANTHROPIC_BASE_URL`, defaulting to `https://api.anthropic.com`
+  (works transparently with a Claude Code gateway/proxy).
+- **Model:** `ANTHROPIC_MODEL`.
+- **Auth header:** `Authorization: Bearer` for custom gateways, `x-api-key`
+  for `api.anthropic.com`.
+
+If no credentials are found the tool errors with a clear message — or bypass AI
+altogether with `--skip-ai-params`.
 
 ### Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `MISTRAL_API_KEY` | ✅ Yes | Your Mistral AI API key |
+| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | For AI mode | Claude/Anthropic key (falls back to `~/.claude/settings.json`) |
+| `ANTHROPIC_BASE_URL` | ❌ No | Override API base URL |
+| `ANTHROPIC_MODEL` | ❌ No | Override model name |
 
 ---
 
@@ -225,6 +228,7 @@ python3 unauth_checker.py \
 | `--file` | `-f` | Path to local OpenAPI JSON file | ⚠️ One of `-u` or `-f` |
 | `--output` | `-o` | Custom output CSV filename | ❌ No (auto-generated) |
 | `--verbose` | `-v` | Show detailed execution logs | ❌ No |
+| `--skip-ai-params` | — | Skip AI (`ai_agent.py`) param generation; use spec/type values, no API key | ❌ No |
 
 ---
 
@@ -246,7 +250,7 @@ python3 unauth_checker.py \
          │
          ▼
 ┌─────────────────┐      ┌──────────────┐
-│  For Each       │─────▶│  Mistral AI  │
+│  For Each       │─────▶│  Claude AI   │
 │  Parameter      │      │  Generate    │
 │                 │      │  Test Values │
 └────────┬────────┘      └──────────────┘
@@ -278,7 +282,7 @@ python3 unauth_checker.py \
    - Extracts parameter definitions (name, type, description)
 
 3. **🤖 AI Parameter Generation**
-   - For each parameter, sends request to Mistral AI with:
+   - For each parameter, sends request to Claude (Anthropic) with:
      - Parameter name
      - Parameter type
      - Parameter description
@@ -435,12 +439,10 @@ endpoint,method,params_count,params_values,status_codes,response,confidence,conf
 
 ### Common Issues
 
-#### ❌ `MISTRAL_API_KEY environment variable not set`
+#### ❌ `No Anthropic API key found`
 
 **Solution:**
-```bash
-export MISTRAL_API_KEY="your-api-key-here"
-```
+Configure Claude Code (`~/.claude/settings.json`) or `export ANTHROPIC_API_KEY=...`. Or run with `--skip-ai-params` to bypass AI entirely.
 
 #### ❌ `Failed to fetch OpenAPI spec from URL`
 
@@ -469,7 +471,7 @@ export MISTRAL_API_KEY="your-api-key-here"
 
 **Solution:**
 - Verify API key is correct
-- Check Mistral AI service status
+- Check the Anthropic/gateway service status
 - Tool will fallback to "test" values if AI fails
 
 #### ❌ CSV/Excel file not created
@@ -528,7 +530,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 🙏 Acknowledgments
 
-- **Mistral AI** for providing the AI API for parameter generation
+- **Anthropic Claude** for providing the AI API for parameter generation
 - OpenAPI/Swagger community for the specification standards
 - All contributors and users of this tool
 
