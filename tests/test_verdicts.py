@@ -106,6 +106,12 @@ def test_e2e_unauth_only_sensitive(mock_api):
     assert by_ep["/open-sensitive"] == "OPEN-2XX-SENSITIVE"
     assert by_ep["/me"] == "PROTECTED"
 
+def test_e2e_benign_public_is_review_not_sensitive(mock_api):
+    # A 2xx with a non-sensitive body is surfaced for review, not flagged
+    # as sensitive exposure.
+    by_ep, _ = _scan(mock_api, tiers=None)
+    assert by_ep["/public-same"] == "OPEN-2XX-REVIEW"
+
 
 # --------------------------------------------------------------------------
 # end-to-end: rate-limit behaviour
@@ -139,5 +145,6 @@ def test_findings_only_signal(mock_api, tmp_path):
     assert all(r["category"] in
                ("AUTHZ-BYPASS", "BFLA-PRIVESC", "OPEN-2XX-SENSITIVE",
                 "OPEN-2XX-REVIEW") for r in rows)
-    # and no protected/noise leaked in
-    assert not any(r["category"] == "PROTECTED" for r in rows)
+    # and no noise (protected / unverified) leaked into findings
+    assert not any(r["category"] in ("PROTECTED", "UNVERIFIED-RATELIMITED")
+                   for r in rows)
