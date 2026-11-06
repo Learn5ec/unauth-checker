@@ -2,15 +2,28 @@
 
 <div align="center">
 
-**AI-Powered Unauthenticated API Endpoint Discovery Tool**
+**Authorization-Tier Differential API Scanner**
 
 [![Python](https://img.shields.io/badge/Python-3.6+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Anthropic Claude](https://img.shields.io/badge/Powered%20by-Claude%20(Anthropic)-blueviolet.svg)](https://www.anthropic.com/)
 
-*Automatically discover unauthenticated API endpoints using OpenAPI specifications and AI-generated test parameters*
+*Compare unauthenticated, user, and admin responses to separate real
+exposure (auth bypass / privilege escalation) from noise*
 
 </div>
+
+> ### 🌿 Branch: `with-authorisation`
+>
+> This branch is the **full differential scanner** — a superset of `web-support`.
+> It adds the authorization-tier model (`-x` user / `-a` admin headers),
+> cross-tier verdicts (`AUTHZ-BYPASS`, `BFLA-PRIVESC`, `OPEN-2XX-*`, …), response-body
+> similarity, the adaptive rate-limit engine, and signal-first reporting
+> with an opt-in `--trace`. A pytest suite (`tests/`) covers it all.
+>
+> For the minimal **single-tier** scanner (unauthenticated-only, CSV/Excel,
+> Claude Code credentials, `--skip-ai-params`) see the **`web-support`** branch.
+> The two branches are intentionally kept separate and are not merged.
 
 ---
 
