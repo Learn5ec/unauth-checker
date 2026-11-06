@@ -29,6 +29,15 @@ def main():
         help="Comma-separated HTTP methods to test (e.g. 'get,post'). Default: all.",
         default=None
     )
+    # Rate-limit management
+    parser.add_argument("--max-rps", type=float, default=5.0,
+                        help="Hard ceiling on requests/sec per host (default 5)")
+    parser.add_argument("--min-interval", type=float, default=0.05,
+                        help="Minimum seconds between requests per host (default 0.05)")
+    parser.add_argument("--max-retries", type=int, default=4,
+                        help="Per-request retry budget when rate-limited (default 4)")
+    parser.add_argument("--cooldown-cap", type=float, default=120.0,
+                        help="Max seconds to sleep for a single rate-limit cooldown (default 120)")
 
     args = parser.parse_args()
 
@@ -44,7 +53,11 @@ def main():
         output_file=args.output,
         verbose=args.verbose,
         use_ai=not args.skip_ai_params,
-        methods=methods
+        methods=methods,
+        max_rps=args.max_rps,
+        min_interval=args.min_interval,
+        max_retries=args.max_retries,
+        cooldown_cap=args.cooldown_cap,
     )
 
 if __name__ == "__main__":

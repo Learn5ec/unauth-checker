@@ -7,6 +7,7 @@ import requests
 from urllib.parse import urlparse, quote
 from typing import Dict, Any, List, Tuple, Optional
 from ai_agent import AIAgent
+from ratelimit import SafeHTTP, RateLimitedExhausted, RATE_LIMITED
 
 # Try to import openpyxl for Excel generation, make it optional
 try:
@@ -574,7 +575,7 @@ def build_request(endpoint, sample, base_url, extra_headers=None, send_body=True
         "has_unresolved_path": has_unresolved,
     }
 
-def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=None, use_ai=True):
+def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=None, use_ai=True, http=None):
     params_count = len(endpoint["params"])
 
     if verbose:
@@ -612,7 +613,8 @@ def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=N
 
         try:
             req = build_request(endpoint, params, base_url)
-            r = requests.request(
+            sender = http or requests
+            r = sender.request(
                 req["method"],
                 req["url"],
                 params=req["params"] or None,
@@ -633,6 +635,14 @@ def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=N
                 print("        → Response:")
                 print(clean_response_body(r.text))
 
+        except RateLimitedExhausted as e:
+            # Throttled and retries exhausted: NOT a result — do not let a 429
+            # masquerade as a protected/200 verdict. Recorded distinctly.
+            if verbose:
+                print(f"        [!] Rate-limited, retries exhausted: {e}")
+            statuses.add(RATE_LIMITED)
+            response_body = "Rate-limited; retries exhausted (unverified)"
+
         except requests.RequestException as e:
             if verbose:
                 print(f"        [!] Error: {e}")
@@ -640,6 +650,8 @@ def test_endpoint(endpoint, base_url, csv_file, index, total, verbose, samples=N
             response_body = f"Request Error: {str(e)}"
 
         confidence, confidence_level = score_result(statuses, response_body)
+        if RATE_LIMITED in statuses:
+            confidence, confidence_level = 0, "UNVERIFIED"
 
         result = {
             "endpoint": endpoint["path"],
@@ -724,7 +736,9 @@ def _expected_case_count(ep: Dict[str, Any], use_ai: bool) -> int:
     return 3 if use_ai else 2
 
 
-def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=True, methods=None):
+def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=True, methods=None,
+             max_rps=5.0, min_interval=0.05, rate_margin=2, max_retries=4, cooldown_cap=120.0,
+             adaptive=True, respect_retry_after=True):
     spec, base_url = load_openapi(url, file_path)
     endpoints = extract_endpoints(spec)
 
@@ -757,6 +771,12 @@ def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=T
     completed_count = len(completed)
     total_test_cases = sum(_expected_case_count(ep, use_ai) for ep in endpoints) or 1
 
+    http = SafeHTTP(
+        max_rps=max_rps, min_interval=min_interval, rate_margin=rate_margin,
+        max_retries=max_retries, cooldown_cap=cooldown_cap, adaptive=adaptive,
+        respect_retry_after=respect_retry_after,
+    )
+
     for ep_idx, ep in enumerate(endpoints, 1):
         # Generate samples once and reuse them for both the resume-key check and
         # the actual requests. Calling generate_param_samples twice (as before)
@@ -784,7 +804,8 @@ def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=T
             total,
             verbose,
             samples=samples,
-            use_ai=use_ai
+            use_ai=use_ai,
+            http=http
         )
         completed_count += len(all_keys)
         update_progress(completed_count, total_test_cases)
@@ -792,10 +813,16 @@ def run_scan(url=None, file_path=None, output_file=None, verbose=False, use_ai=T
     # Save Excel file if it was created
     excel_file = output_file.replace('.csv', '.xlsx')
     save_excel_file()
-    
+    http.close()
+
     if verbose:
         print("\n[*] Scan completed successfully")
         print(f"[*] Results stored in {output_file}")
+        if http.throttle_hits:
+            print(
+                f"[*] Rate-limit stats: {http.throttle_hits} throttle hit(s), "
+                f"{http.retries_done} retry/re-run(s), {http.unverified} unverified after retries"
+            )
         if OPENPYXL_AVAILABLE and os.path.exists(excel_file):
             print(f"[*] Excel file with formatting: {excel_file}")
         elif not OPENPYXL_AVAILABLE:
