@@ -12,6 +12,20 @@
 
 </div>
 
+> ### 🌿 Branch: `web-support`
+>
+> This branch is the **single-tier scanner**. It sends **unauthenticated**
+> requests only, tests each endpoint with a few parameter sets, and writes a full
+> CSV/Excel report with confidence scores. It adds two things on top of the base
+> tool: AI parameter generation via the **Claude Code credentials already in
+> `~/.claude/settings.json`** (no separate key / Mistral), and a
+> **`--skip-ai-params`** flag to run without any key.
+>
+> **Not on this branch:** authorization tiers (`-x`/`-a`), cross-tier verdicts
+> (auth-bypass / privilege-escalation), the adaptive rate-limit engine, and
+> signal-first findings output. Those live on the **`with-authorisation`** branch.
+> The two branches are intentionally kept separate and are not merged.
+
 ---
 
 ## 📋 Table of Contents
