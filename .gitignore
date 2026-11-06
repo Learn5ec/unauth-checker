@@ -6,3 +6,6 @@ __pycache__/
 
 # Local working docs (not shipped)
 PLAN.md
+
+.hypothesis/
+.pytest_cache/
